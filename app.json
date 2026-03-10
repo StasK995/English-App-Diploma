@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "LamaLearn",
+    "slug": "lamalearn",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/splash.jpg",
+    "splash": {
+      "image": "./assets/splash.jpg",
+      "resizeMode": "cover",
+      "backgroundColor": "#3AAFA9"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.lamalearn.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/splash.jpg",
+        "backgroundColor": "#3AAFA9"
+      },
+      "package": "com.lamalearn.app"
+    },
+    "plugins": [
+      "expo-sqlite"
+    ]
+  }
+}

@@ -1,537 +1,310 @@
-// screens/SRSSettingsScreen.js
-// Екран налаштувань сесії навчання
-
 import React, { useState, useEffect } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ScrollView,
-  SafeAreaView,
+  View, Text, StyleSheet, TouchableOpacity, ScrollView, SafeAreaView,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getAllWords } from '../data/vocabulary_words';
 import { levels, categories } from '../data/vocabulary_config';
+import {
+  getLearnedCountForWordIds,
+  getWordsForSRSSession,
+  getSRSStatsByLevel,
+} from '../utils/database';
 
 export default function SRSSettingsScreen({ navigation }) {
   const [selectedLevel, setSelectedLevel] = useState(null);
   const [selectedCategory, setSelectedCategory] = useState(null);
-  const [wordsCount, setWordsCount] = useState(10);
-  const [mode, setMode] = useState('mixed'); // new, review, mixed
-  const [knownWords, setKnownWords] = useState([]);
+  const [wordsCount, setWordsCount] = useState(20);
+  const [mode, setMode] = useState('mixed');
   const [levelProgress, setLevelProgress] = useState({});
+  const [levelSRSStats, setLevelSRSStats] = useState({});
+  const [sessionPreview, setSessionPreview] = useState({ due: 0, new: 0 });
 
   useEffect(() => {
     loadProgress();
-  }, []);
+    // ✅ Оновлюємо при поверненні на екран
+    const unsubscribe = navigation.addListener('focus', loadProgress);
+    return unsubscribe;
+  }, [navigation]);
+
+  useEffect(() => {
+    if (selectedLevel) {
+      updateSessionPreviewForLevel(selectedLevel, selectedCategory, wordsCount);
+    }
+  }, [selectedLevel, selectedCategory, wordsCount, mode]);
 
   const loadProgress = async () => {
-    try {
-      const knownWordsData = await AsyncStorage.getItem('knownWords');
-      const known = knownWordsData ? JSON.parse(knownWordsData) : [];
-      setKnownWords(known);
+    const allWords = getAllWords();
+    const progress = {};
+    const srsStats = {};
 
-      // Підрахунок прогресу по рівнях
-      const allWords = getAllWords();
-      const progress = {};
+    for (const level of levels) {
+      const ids = allWords.filter(w => w.level === level.code).map(w => w.id);
+      const learned = await getLearnedCountForWordIds(ids);
+      progress[level.code] = {
+        total: ids.length,
+        learned,
+        percentage: ids.length > 0 ? Math.round((learned / ids.length) * 100) : 0,
+      };
+      srsStats[level.code] = await getSRSStatsByLevel(ids);
+    }
 
-      levels.forEach(level => {
-        const levelWords = allWords.filter(w => w.level === level.code);
-        const learnedCount = levelWords.filter(w => known.includes(w.id)).length;
-        progress[level.code] = {
-          total: levelWords.length,
-          learned: learnedCount,
-          percentage: levelWords.length > 0 ? Math.round((learnedCount / levelWords.length) * 100) : 0,
-        };
-      });
+    setLevelProgress(progress);
+    setLevelSRSStats(srsStats);
 
-      setLevelProgress(progress);
+    let firstLevel = null;
+    const withDue = levels.find(l => (srsStats[l.code]?.due || 0) > 0);
+    const first = withDue || levels.find(l => (progress[l.code]?.percentage || 0) < 100) || levels[0];
+    if (first) {
+      firstLevel = first.code;
+      setSelectedLevel(firstLevel);
+    }
 
-      // Автоматично вибираємо перший незавершений рівень
-      const firstIncomplete = levels.find(level => 
-        progress[level.code] && progress[level.code].percentage < 100
-      );
-      if (firstIncomplete && !selectedLevel) {
-        setSelectedLevel(firstIncomplete.code);
-      }
-    } catch (error) {
-      console.error('Error loading progress:', error);
+    if (firstLevel) {
+      await updateSessionPreviewForLevel(firstLevel, null, 20);
     }
   };
 
-  const getAvailableWords = () => {
-    const allWords = getAllWords();
-    let filtered = allWords;
-
-    // Фільтр за рівнем
-    if (selectedLevel) {
-      filtered = filtered.filter(w => w.level === selectedLevel);
+  const updateSessionPreviewForLevel = async (level, category, count) => {
+    if (!level) return;
+    try {
+      let allWords = getAllWords().filter(w => w.level === level);
+      if (category) allWords = allWords.filter(w => w.category === category);
+      const { dueWords, newWords } = await getWordsForSRSSession(allWords, count);
+      setSessionPreview({ due: dueWords.length, new: newWords.length });
+    } catch (e) {
+      console.error('Preview error:', e);
     }
-
-    // Фільтр за категорією
-    if (selectedCategory) {
-      filtered = filtered.filter(w => w.category === selectedCategory);
-    }
-
-    // Фільтр за режимом
-    if (mode === 'new') {
-      filtered = filtered.filter(w => !knownWords.includes(w.id));
-    } else if (mode === 'review') {
-      filtered = filtered.filter(w => knownWords.includes(w.id));
-    }
-
-    return filtered;
   };
 
   const startSession = () => {
-    const availableWords = getAvailableWords();
-
-    if (availableWords.length === 0) {
-      alert('Немає слів для вивчення з такими налаштуваннями');
+    const total = sessionPreview.due + sessionPreview.new;
+    if (total === 0) {
+      alert('Немає слів для навчання. Поверніться завтра або оберіть інший рівень!');
       return;
     }
-
     navigation.navigate('SRSLearn', {
       level: selectedLevel,
       category: selectedCategory,
-      wordsCount: wordsCount,
-      mode: mode,
+      wordsCount,
+      mode,
     });
   };
-
-  const LevelCard = ({ level }) => {
-    const progress = levelProgress[level.code] || { total: 0, learned: 0, percentage: 0 };
-    const isSelected = selectedLevel === level.code;
-    const isLocked = levels.findIndex(l => l.code === level.code) > 0 && 
-                     levelProgress[levels[levels.findIndex(l => l.code === level.code) - 1]?.code]?.percentage < 100;
-
-    return (
-      <TouchableOpacity
-        style={[
-          styles.levelCard,
-          isSelected && { borderColor: level.color, borderWidth: 3 },
-          isLocked && styles.levelCardLocked,
-        ]}
-        onPress={() => !isLocked && setSelectedLevel(level.code)}
-        disabled={isLocked}
-      >
-        <View style={[styles.levelBadge, { backgroundColor: level.color }]}>
-          <Text style={styles.levelBadgeText}>{level.code}</Text>
-        </View>
-
-        <Text style={styles.levelName}>{level.name}</Text>
-        <Text style={styles.levelDescription}>{level.description}</Text>
-
-        {isLocked ? (
-          <View style={styles.lockedBadge}>
-            <Text style={styles.lockedText}>🔒 Заблоковано</Text>
-          </View>
-        ) : (
-          <>
-            <View style={styles.progressBarContainer}>
-              <View 
-                style={[
-                  styles.progressBarFill, 
-                  { width: `${progress.percentage}%`, backgroundColor: level.color }
-                ]} 
-              />
-            </View>
-            <Text style={styles.progressText}>
-              {progress.learned} / {progress.total} ({progress.percentage}%)
-            </Text>
-          </>
-        )}
-
-        {isSelected && (
-          <View style={styles.selectedBadge}>
-            <Text style={styles.selectedText}>✓</Text>
-          </View>
-        )}
-      </TouchableOpacity>
-    );
-  };
-
-  const CategoryButton = ({ category }) => {
-    const isSelected = selectedCategory === category.id;
-    
-    return (
-      <TouchableOpacity
-        style={[
-          styles.categoryButton,
-          isSelected && styles.categoryButtonSelected,
-        ]}
-        onPress={() => setSelectedCategory(isSelected ? null : category.id)}
-      >
-        <Text style={styles.categoryEmoji}>{category.emoji}</Text>
-        <Text style={[
-          styles.categoryName,
-          isSelected && styles.categoryNameSelected,
-        ]}>
-          {category.name}
-        </Text>
-      </TouchableOpacity>
-    );
-  };
-
-  const availableWordsCount = getAvailableWords().length;
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView>
         <View style={styles.header}>
-          <Text style={styles.title}>Налаштування навчання</Text>
-          <Text style={styles.subtitle}>Оберіть параметри для сесії</Text>
+          <Text style={styles.title}>Навчання</Text>
+          <Text style={styles.subtitle}>Інтервальне повторення (SRS)</Text>
         </View>
 
-        {/* Вибір рівня */}
+        {/* Рівні */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>📚 Оберіть рівень</Text>
-          <Text style={styles.sectionSubtitle}>
-            Вивчайте слова послідовно від A1 до C2
-          </Text>
+          <Text style={styles.sectionTitle}>📚 Рівень</Text>
+          {levels.map(level => {
+            const prog = levelProgress[level.code] || { total: 0, learned: 0, percentage: 0 };
+            const srs = levelSRSStats[level.code] || { due: 0, new: 0, learning: 0, mastered: 0 };
+            const isSelected = selectedLevel === level.code;
 
-          {levels.map(level => (
-            <LevelCard key={level.code} level={level} />
-          ))}
+            return (
+              <TouchableOpacity
+                key={level.code}
+                style={[styles.levelCard, isSelected && { borderColor: level.color, borderWidth: 3 }]}
+                onPress={() => setSelectedLevel(level.code)}
+              >
+                <View style={styles.levelCardTop}>
+                  <View style={[styles.levelBadge, { backgroundColor: level.color }]}>
+                    <Text style={styles.levelBadgeText}>{level.code}</Text>
+                  </View>
+                  <Text style={styles.levelName}>{level.name}</Text>
+                  {isSelected && (
+                    <View style={[styles.checkBadge, { backgroundColor: level.color }]}>
+                      <Text style={styles.checkText}>✓</Text>
+                    </View>
+                  )}
+                </View>
+
+                <View style={styles.progressBar}>
+                  <View style={[styles.progressFill, { width: `${prog.percentage}%`, backgroundColor: level.color }]} />
+                </View>
+                <Text style={styles.progressText}>{prog.learned}/{prog.total} слів ({prog.percentage}%)</Text>
+
+                <View style={styles.srsRow}>
+                  {srs.due > 0 && (
+                    <View style={styles.srsBadge}>
+                      <Text style={styles.srsBadgeText}>🔄 {srs.due} на повторення</Text>
+                    </View>
+                  )}
+                  {srs.new > 0 && (
+                    <View style={[styles.srsBadge, styles.srsBadgeNew]}>
+                      <Text style={[styles.srsBadgeText, { color: '#4A90E2' }]}>🆕 {srs.new} нових</Text>
+                    </View>
+                  )}
+                  {srs.mastered > 0 && (
+                    <View style={[styles.srsBadge, styles.srsBadgeMastered]}>
+                      <Text style={[styles.srsBadgeText, { color: '#50C878' }]}>🎓 {srs.mastered} опановано</Text>
+                    </View>
+                  )}
+                  {srs.due === 0 && srs.new === 0 && srs.mastered === 0 && (
+                    <View style={[styles.srsBadge, styles.srsBadgeNew]}>
+                      <Text style={[styles.srsBadgeText, { color: '#4A90E2' }]}>🆕 {prog.total} нових</Text>
+                    </View>
+                  )}
+                </View>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
-        {/* Вибір категорії */}
+        {/* Категорія */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>🏷️ Категорія (опціонально)</Text>
-          <View style={styles.categoriesGrid}>
-            {categories.map(category => (
-              <CategoryButton key={category.id} category={category} />
-            ))}
+          <View style={styles.chipRow}>
+            <TouchableOpacity
+              style={[styles.chip, !selectedCategory && styles.chipSelected]}
+              onPress={() => setSelectedCategory(null)}
+            >
+              <Text style={styles.chipEmoji}>📋</Text>
+              <Text style={[styles.chipText, !selectedCategory && styles.chipTextSelected]}>Всі</Text>
+            </TouchableOpacity>
+            {categories.map(cat => {
+              const isSelected = selectedCategory === cat.code;
+              return (
+                <TouchableOpacity
+                  key={cat.code}
+                  style={[styles.chip, isSelected && styles.chipSelected]}
+                  onPress={() => setSelectedCategory(isSelected ? null : cat.code)}
+                >
+                  <Text style={styles.chipEmoji}>{cat.emoji}</Text>
+                  <Text style={[styles.chipText, isSelected && styles.chipTextSelected]}>{cat.name}</Text>
+                </TouchableOpacity>
+              );
+            })}
           </View>
         </View>
 
-        {/* Режим навчання */}
+        {/* Режим */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>⚙️ Режим навчання</Text>
-          <View style={styles.modesContainer}>
-            <TouchableOpacity
-              style={[styles.modeButton, mode === 'new' && styles.modeButtonSelected]}
-              onPress={() => setMode('new')}
-            >
-              <Text style={styles.modeEmoji}>🆕</Text>
-              <Text style={[styles.modeText, mode === 'new' && styles.modeTextSelected]}>
-                Тільки нові
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.modeButton, mode === 'mixed' && styles.modeButtonSelected]}
-              onPress={() => setMode('mixed')}
-            >
-              <Text style={styles.modeEmoji}>🔀</Text>
-              <Text style={[styles.modeText, mode === 'mixed' && styles.modeTextSelected]}>
-                Змішано
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.modeButton, mode === 'review' && styles.modeButtonSelected]}
-              onPress={() => setMode('review')}
-            >
-              <Text style={styles.modeEmoji}>🔄</Text>
-              <Text style={[styles.modeText, mode === 'review' && styles.modeTextSelected]}>
-                Повторення
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Кількість слів */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>🔢 Кількість слів</Text>
-          <View style={styles.countsContainer}>
-            {[5, 10, 15, 20].map(count => (
+          <Text style={styles.sectionTitle}>⚙️ Режим</Text>
+          <View style={styles.modesRow}>
+            {[
+              { key: 'mixed',  emoji: '🔀', label: 'Змішано' },
+              { key: 'new',    emoji: '🆕', label: 'Нові' },
+              { key: 'review', emoji: '🔄', label: 'Повторення' },
+            ].map(m => (
               <TouchableOpacity
-                key={count}
-                style={[
-                  styles.countButton,
-                  wordsCount === count && styles.countButtonSelected,
-                ]}
-                onPress={() => setWordsCount(count)}
+                key={m.key}
+                style={[styles.modeBtn, mode === m.key && styles.modeBtnSelected]}
+                onPress={() => setMode(m.key)}
               >
-                <Text style={[
-                  styles.countText,
-                  wordsCount === count && styles.countTextSelected,
-                ]}>
-                  {count}
-                </Text>
+                <Text style={styles.modeEmoji}>{m.emoji}</Text>
+                <Text style={[styles.modeLabel, mode === m.key && styles.modeLabelSelected]}>{m.label}</Text>
               </TouchableOpacity>
             ))}
           </View>
         </View>
 
-        {/* Інформація */}
-        <View style={styles.infoCard}>
-          <Text style={styles.infoTitle}>📊 Доступно для вивчення:</Text>
-          <Text style={styles.infoValue}>{availableWordsCount} слів</Text>
-          {availableWordsCount < wordsCount && (
-            <Text style={styles.infoWarning}>
-              ⚠️ Доступно менше слів, ніж обрано
+        {/* Кількість */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>🔢 Слів за сесію</Text>
+          <View style={styles.chipRow}>
+            {[10, 20, 30, 50].map(n => (
+              <TouchableOpacity
+                key={n}
+                style={[styles.countBtn, wordsCount === n && styles.countBtnSelected]}
+                onPress={() => setWordsCount(n)}
+              >
+                <Text style={[styles.countText, wordsCount === n && styles.countTextSelected]}>{n}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        {/* Preview сесії */}
+        <View style={styles.previewCard}>
+          <Text style={styles.previewTitle}>Сесія буде складатися з:</Text>
+          <View style={styles.previewRow}>
+            <View style={styles.previewItem}>
+              <Text style={[styles.previewVal, { color: '#E67E22' }]}>{sessionPreview.due}</Text>
+              <Text style={styles.previewLabel}>🔄 На повторення</Text>
+            </View>
+            <View style={styles.previewDivider} />
+            <View style={styles.previewItem}>
+              <Text style={[styles.previewVal, { color: '#4A90E2' }]}>{sessionPreview.new}</Text>
+              <Text style={styles.previewLabel}>🆕 Нові слова</Text>
+            </View>
+          </View>
+          {sessionPreview.due === 0 && sessionPreview.new === 0 && (
+            <Text style={styles.previewEmpty}>
+              🎯 Все повторено! Поверніться завтра або оберіть інший рівень.
             </Text>
           )}
         </View>
 
-        {/* Кнопка старту */}
         <TouchableOpacity
           style={[
-            styles.startButton,
-            availableWordsCount === 0 && styles.startButtonDisabled,
+            styles.startBtn,
+            (sessionPreview.due + sessionPreview.new) === 0 && styles.startBtnDisabled,
           ]}
           onPress={startSession}
-          disabled={availableWordsCount === 0}
+          disabled={(sessionPreview.due + sessionPreview.new) === 0}
         >
-          <Text style={styles.startButtonText}>
-            🚀 Почати навчання
-          </Text>
+          <Text style={styles.startBtnText}>🚀 Почати навчання</Text>
         </TouchableOpacity>
 
-        <View style={styles.bottomPadding} />
+        <View style={{ height: 30 }} />
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F5F7FA',
-  },
-  header: {
-    padding: 20,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-    marginBottom: 4,
-  },
-  subtitle: {
-    fontSize: 16,
-    color: '#7F8C8D',
-  },
-  section: {
-    padding: 20,
-    paddingTop: 10,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-    marginBottom: 8,
-  },
-  sectionSubtitle: {
-    fontSize: 14,
-    color: '#7F8C8D',
-    marginBottom: 15,
-  },
-  levelCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: 'transparent',
-    position: 'relative',
-  },
-  levelCardLocked: {
-    opacity: 0.6,
-  },
-  levelBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  levelBadgeText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  levelName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-    marginBottom: 4,
-  },
-  levelDescription: {
-    fontSize: 14,
-    color: '#7F8C8D',
-    marginBottom: 12,
-  },
-  progressBarContainer: {
-    height: 8,
-    backgroundColor: '#E0E0E0',
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  progressText: {
-    fontSize: 12,
-    color: '#7F8C8D',
-  },
-  lockedBadge: {
-    backgroundColor: '#E0E0E0',
-    paddingVertical: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  lockedText: {
-    fontSize: 14,
-    color: '#7F8C8D',
-  },
-  selectedBadge: {
-    position: 'absolute',
-    top: 16,
-    right: 16,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#50C878',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  selectedText: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  categoriesGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  categoryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  categoryButtonSelected: {
-    borderColor: '#4A90E2',
-    backgroundColor: '#E3F2FD',
-  },
-  categoryEmoji: {
-    fontSize: 18,
-    marginRight: 6,
-  },
-  categoryName: {
-    fontSize: 14,
-    color: '#2C3E50',
-  },
-  categoryNameSelected: {
-    fontWeight: 'bold',
-    color: '#4A90E2',
-  },
-  modesContainer: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  modeButton: {
-    flex: 1,
-    alignItems: 'center',
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  modeButtonSelected: {
-    borderColor: '#4A90E2',
-    backgroundColor: '#E3F2FD',
-  },
-  modeEmoji: {
-    fontSize: 28,
-    marginBottom: 8,
-  },
-  modeText: {
-    fontSize: 14,
-    color: '#2C3E50',
-  },
-  modeTextSelected: {
-    fontWeight: 'bold',
-    color: '#4A90E2',
-  },
-  countsContainer: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  countButton: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  countButtonSelected: {
-    borderColor: '#4A90E2',
-    backgroundColor: '#E3F2FD',
-  },
-  countText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-  },
-  countTextSelected: {
-    color: '#4A90E2',
-  },
-  infoCard: {
-    backgroundColor: '#FFF9E6',
-    marginHorizontal: 20,
-    padding: 16,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderLeftWidth: 4,
-    borderLeftColor: '#F39C12',
-  },
-  infoTitle: {
-    fontSize: 14,
-    color: '#8E6F3E',
-    marginBottom: 4,
-  },
-  infoValue: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#E67E22',
-  },
-  infoWarning: {
-    fontSize: 12,
-    color: '#E67E22',
-    marginTop: 8,
-  },
-  startButton: {
-    backgroundColor: '#4A90E2',
-    marginHorizontal: 20,
-    marginTop: 20,
-    padding: 18,
-    borderRadius: 16,
-    alignItems: 'center',
-  },
-  startButtonDisabled: {
-    backgroundColor: '#BDC3C7',
-  },
-  startButtonText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-  },
-  bottomPadding: {
-    height: 30,
-  },
+  container: { flex: 1, backgroundColor: '#F5F7FA' },
+  header: { padding: 20, paddingBottom: 8 },
+  title: { fontSize: 28, fontWeight: 'bold', color: '#2C3E50', marginBottom: 4 },
+  subtitle: { fontSize: 14, color: '#7F8C8D' },
+  section: { padding: 20, paddingTop: 4 },
+  sectionTitle: { fontSize: 18, fontWeight: 'bold', color: '#2C3E50', marginBottom: 12 },
+  levelCard: { backgroundColor: '#fff', borderRadius: 14, padding: 16, marginBottom: 10, borderWidth: 2, borderColor: 'transparent', elevation: 2 },
+  levelCardTop: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+  levelBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, marginRight: 10 },
+  levelBadgeText: { color: '#fff', fontSize: 13, fontWeight: 'bold' },
+  levelName: { fontSize: 16, fontWeight: 'bold', color: '#2C3E50', flex: 1 },
+  checkBadge: { width: 26, height: 26, borderRadius: 13, justifyContent: 'center', alignItems: 'center' },
+  checkText: { color: '#fff', fontSize: 14, fontWeight: 'bold' },
+  progressBar: { height: 6, backgroundColor: '#E0E0E0', borderRadius: 3, overflow: 'hidden', marginBottom: 6 },
+  progressFill: { height: '100%', borderRadius: 3 },
+  progressText: { fontSize: 12, color: '#7F8C8D', marginBottom: 8 },
+  srsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  srsBadge: { backgroundColor: '#FFF3E0', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  srsBadgeNew: { backgroundColor: '#E3F2FD' },
+  srsBadgeMastered: { backgroundColor: '#E8F5E9' },
+  srsBadgeText: { fontSize: 11, color: '#E67E22', fontWeight: '600' },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, borderWidth: 2, borderColor: 'transparent', gap: 4 },
+  chipSelected: { borderColor: '#4A90E2', backgroundColor: '#E3F2FD' },
+  chipEmoji: { fontSize: 16 },
+  chipText: { fontSize: 13, color: '#2C3E50' },
+  chipTextSelected: { fontWeight: 'bold', color: '#4A90E2' },
+  modesRow: { flexDirection: 'row', gap: 10 },
+  modeBtn: { flex: 1, alignItems: 'center', backgroundColor: '#fff', padding: 14, borderRadius: 12, borderWidth: 2, borderColor: 'transparent', elevation: 1 },
+  modeBtnSelected: { borderColor: '#4A90E2', backgroundColor: '#E3F2FD' },
+  modeEmoji: { fontSize: 24, marginBottom: 6 },
+  modeLabel: { fontSize: 12, color: '#2C3E50', fontWeight: '600' },
+  modeLabelSelected: { color: '#4A90E2' },
+  countBtn: { flex: 1, backgroundColor: '#fff', padding: 14, borderRadius: 12, alignItems: 'center', borderWidth: 2, borderColor: 'transparent', elevation: 1 },
+  countBtnSelected: { borderColor: '#4A90E2', backgroundColor: '#E3F2FD' },
+  countText: { fontSize: 18, fontWeight: 'bold', color: '#2C3E50' },
+  countTextSelected: { color: '#4A90E2' },
+  previewCard: { backgroundColor: '#fff', marginHorizontal: 20, padding: 20, borderRadius: 14, elevation: 2, marginBottom: 16 },
+  previewTitle: { fontSize: 14, color: '#7F8C8D', textAlign: 'center', marginBottom: 16 },
+  previewRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
+  previewItem: { alignItems: 'center' },
+  previewVal: { fontSize: 36, fontWeight: 'bold', marginBottom: 4 },
+  previewLabel: { fontSize: 13, color: '#7F8C8D' },
+  previewDivider: { width: 1, height: 50, backgroundColor: '#E0E0E0' },
+  previewEmpty: { textAlign: 'center', color: '#7F8C8D', fontSize: 14, marginTop: 12 },
+  startBtn: { backgroundColor: '#4A90E2', marginHorizontal: 20, padding: 18, borderRadius: 14, alignItems: 'center', elevation: 4 },
+  startBtnDisabled: { backgroundColor: '#BDC3C7' },
+  startBtnText: { fontSize: 18, fontWeight: 'bold', color: '#fff' },
 });

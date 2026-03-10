@@ -12,7 +12,7 @@ import {
   TextInput,
 } from 'react-native';
 import { GRAMMAR_LEVELS, getLevelsArray } from '../data/grammar_config';
-import { GRAMMAR_TOPICS } from '../data/grammar_topics';
+import { GRAMMAR_TOPICS, getTopicById } from '../data/grammar';
 
 // Компонент вибору рівня
 const LevelSelector = ({ selectedLevel, onSelectLevel }) => {

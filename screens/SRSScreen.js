@@ -1,413 +1,319 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  Animated,
-  SafeAreaView,
-  Alert,
+  View, Text, StyleSheet, TouchableOpacity, Animated, SafeAreaView,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Speech from 'expo-speech';
 import { getAllWords } from '../data/vocabulary_words';
 import { levels } from '../data/vocabulary_config';
+import {
+  getSRSStatesForWords,
+  getWordsForSRSSession,
+  saveSRSResult,
+  updateStreak,
+} from '../utils/database';
+import {
+  calculateNextReview,
+  createInitialSRSState,
+  RATING,
+  getNextReviewText,
+} from '../utils/srsAlgorithm';
 
 export default function SRSScreen({ route, navigation }) {
   const { level, category, wordsCount, mode } = route.params || {};
-  
-  const [cards, setCards] = useState([]);
+
+  const [sessionWords, setSessionWords] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
-  const [knownWords, setKnownWords] = useState([]);
-  const [sessionStats, setSessionStats] = useState({
-    total: 0,
-    learned: 0,
-    reviewing: 0,
-  });
-  const [isSessionComplete, setIsSessionComplete] = useState(false);
-  const [levelCompleted, setLevelCompleted] = useState(false);
-  const [flipAnim] = useState(new Animated.Value(0));
+  const [srsStates, setSrsStates] = useState({});
+  const [isComplete, setIsComplete] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [dueCount, setDueCount] = useState(0);
+  const [newCount, setNewCount] = useState(0);
+
+  const fadeAnim = useRef(new Animated.Value(1)).current;
+  const sessionWordsRef = useRef([]);
+  const statsRef = useRef({ easy: 0, hard: 0, wrong: 0 });
+  const currentIndexRef = useRef(0);
 
   useEffect(() => {
     loadSession();
+    return () => { Speech.stop(); };
   }, []);
 
   const loadSession = async () => {
+    setIsLoading(true);
     try {
-      const knownWordsData = await AsyncStorage.getItem('knownWords');
-      const known = knownWordsData ? JSON.parse(knownWordsData) : [];
-      setKnownWords(known);
+      let allWords = getAllWords();
+      if (level) allWords = allWords.filter(w => w.level === level);
+      if (category) allWords = allWords.filter(w => w.category === category);
 
-      const allWords = getAllWords();
-      let filtered = allWords;
+      const { dueWords, newWords, sessionWords: mixed } = await getWordsForSRSSession(
+        allWords, wordsCount || 20
+      );
 
-      // Фільтр за рівнем
-      if (level) {
-        filtered = filtered.filter(w => w.level === level);
+      let words = [];
+      if (mode === 'new') words = newWords;
+      else if (mode === 'review') words = dueWords;
+      else words = mixed;
+
+      if (words.length === 0) {
+        setIsComplete(true);
+        setIsLoading(false);
+        return;
       }
 
-      // Фільтр за категорією
-      if (category) {
-        filtered = filtered.filter(w => w.category === category);
-      }
+      const wordIds = words.map(w => w.id);
+      const states = await getSRSStatesForWords(wordIds);
 
-      // Фільтр за режимом
-      if (mode === 'new') {
-        filtered = filtered.filter(w => !known.includes(w.id));
-      } else if (mode === 'review') {
-        filtered = filtered.filter(w => known.includes(w.id));
-      }
-
-      // Перемішуємо та беремо потрібну кількість
-      const shuffled = filtered.sort(() => 0.5 - Math.random());
-      const sessionWords = shuffled.slice(0, wordsCount || 10);
-
-      setCards(sessionWords);
-      setSessionStats({
-        total: sessionWords.length,
-        learned: 0,
-        reviewing: 0,
-      });
-    } catch (error) {
-      console.error('Error loading session:', error);
+      sessionWordsRef.current = words;
+      setSessionWords(words);
+      setSrsStates(states);
+      setDueCount(dueWords.length);
+      setNewCount(newWords.length);
+    } catch (e) {
+      console.error('loadSession error:', e);
     }
+    setIsLoading(false);
   };
 
-  const checkLevelCompletion = async () => {
-    if (!level) return;
-
-    const allWords = getAllWords();
-    const levelWords = allWords.filter(w => w.level === level);
-    const learnedLevelWords = levelWords.filter(w => knownWords.includes(w.id));
-
-    if (learnedLevelWords.length === levelWords.length) {
-      setLevelCompleted(true);
-    }
-  };
-
-  const flipCard = () => {
-    if (showTranslation) {
-      Animated.timing(flipAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }).start(() => setShowTranslation(false));
-    } else {
-      setShowTranslation(true);
-      Animated.timing(flipAnim, {
-        toValue: 1,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
-    }
+  const showCard = () => {
+    if (showTranslation) return;
+    Animated.sequence([
+      Animated.timing(fadeAnim, { toValue: 0, duration: 120, useNativeDriver: true }),
+      Animated.timing(fadeAnim, { toValue: 1, duration: 200, useNativeDriver: true }),
+    ]).start();
+    setTimeout(() => setShowTranslation(true), 120);
   };
 
   const speakWord = (word) => {
-    if (isSpeaking) {
-      Speech.stop();
-      setIsSpeaking(false);
-      return;
-    }
-
+    Speech.stop();
     setIsSpeaking(true);
     Speech.speak(word, {
       language: 'en-US',
-      pitch: 1.0,
       rate: 0.75,
       onDone: () => setIsSpeaking(false),
+      onStopped: () => setIsSpeaking(false),
       onError: () => setIsSpeaking(false),
     });
   };
 
-  const handleKnow = async () => {
-    const currentCard = cards[currentIndex];
-    
-    // Додаємо до вивчених слів
-    if (!knownWords.includes(currentCard.id)) {
-      const updatedKnown = [...knownWords, currentCard.id];
-      setKnownWords(updatedKnown);
-      await AsyncStorage.setItem('knownWords', JSON.stringify(updatedKnown));
-      
-      // Оновлюємо загальну статистику
-      await AsyncStorage.setItem('wordsLearned', updatedKnown.length.toString());
-      const today = await AsyncStorage.getItem('todayWords');
-      await AsyncStorage.setItem('todayWords', (parseInt(today || 0) + 1).toString());
+  const handleRating = async (rating) => {
+    const words = sessionWordsRef.current;
+    const idx = currentIndexRef.current;
+    const word = words[idx];
+    if (!word) return;
+
+    const rawState = srsStates[word.id];
+    const normalizedState = rawState
+      ? {
+          wordId: rawState.word_id ?? rawState.wordId ?? word.id,
+          interval: rawState.interval ?? 0,
+          easeFactor: rawState.ease_factor ?? rawState.easeFactor ?? 2.5,
+          repetitions: rawState.repetitions ?? 0,
+          learningStep: rawState.learning_step ?? rawState.learningStep ?? 0,
+          nextReview: rawState.next_review ?? rawState.nextReview ?? null,
+          lastReview: rawState.last_review ?? rawState.lastReview ?? null,
+          status: rawState.status ?? 'new',
+        }
+      : createInitialSRSState(word.id);
+
+    const newState = calculateNextReview(normalizedState, rating);
+
+    try {
+      await saveSRSResult(newState);
+      await updateStreak();
+    } catch (e) {
+      console.error('saveSRSResult error:', e);
     }
 
-    setSessionStats(prev => ({
-      ...prev,
-      learned: prev.learned + 1,
-    }));
+    setSrsStates(prev => ({ ...prev, [word.id]: newState }));
 
-    moveToNext();
-  };
+    const newStats = { ...statsRef.current };
+    if (rating >= RATING.EASY) {
+      newStats.easy += 1;
+    } else if (rating === RATING.HARD) {
+      newStats.hard += 1;
+    } else {
+      newStats.wrong += 1;
+      const updatedWords = [...words, word];
+      sessionWordsRef.current = updatedWords;
+      setSessionWords([...updatedWords]);
+    }
+    statsRef.current = newStats;
 
-  const handleDontKnow = () => {
-    const currentCard = cards[currentIndex];
-    
-    // Додаємо слово в кінець черги
-    setCards(prevCards => {
-      const newCards = [...prevCards];
-      newCards.push(currentCard);
-      return newCards;
-    });
-
-    setSessionStats(prev => ({
-      ...prev,
-      reviewing: prev.reviewing + 1,
-    }));
-
-    moveToNext();
-  };
-
-const moveToNext = async () => {
-      setShowTranslation(false);
-    flipAnim.setValue(0);
     Speech.stop();
     setIsSpeaking(false);
 
-    if (currentIndex + 1 >= cards.length) {
-      // Сесія завершена
-      await checkLevelCompletion();
-      setIsSessionComplete(true);
-    } else {
-      setCurrentIndex(currentIndex + 1);
-    }
-  };
+    const nextIdx = idx + 1;
+    currentIndexRef.current = nextIdx;
 
-  const restartSession = () => {
-    setIsSessionComplete(false);
-    setCurrentIndex(0);
-    setSessionStats({
-      total: cards.length,
-      learned: 0,
-      reviewing: 0,
+    // Плавний перехід до наступної картки
+    Animated.timing(fadeAnim, { toValue: 0, duration: 150, useNativeDriver: true }).start(() => {
+      setShowTranslation(false);
+      if (nextIdx >= sessionWordsRef.current.length) {
+        setIsComplete(true);
+      } else {
+        setCurrentIndex(nextIdx);
+      }
+      Animated.timing(fadeAnim, { toValue: 1, duration: 250, useNativeDriver: true }).start();
     });
-    loadSession();
   };
 
-  const frontInterpolate = flipAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '180deg'],
-  });
-
-  const backInterpolate = flipAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['180deg', '360deg'],
-  });
-
-  if (cards.length === 0) {
+  // ---- Завантаження ----
+  if (isLoading) {
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
+        <View style={styles.center}>
           <Text style={styles.loadingText}>Завантаження...</Text>
         </View>
       </SafeAreaView>
     );
   }
 
-  if (isSessionComplete) {
-    const percentage = Math.round((sessionStats.learned / sessionStats.total) * 100);
-    const levelData = level ? levels.find(l => l.code === level) : null;
-    
+  // ---- Завершення ----
+  if (isComplete || sessionWords.length === 0) {
+    const stats = statsRef.current;
+    const total = stats.easy + stats.hard + stats.wrong;
+    const pct = total > 0 ? Math.round((stats.easy / total) * 100) : 0;
+    const emoji = pct >= 80 ? '🎉' : pct >= 50 ? '👍' : total === 0 ? '🎯' : '💪';
+
     return (
       <SafeAreaView style={styles.container}>
-        <View style={styles.completeContainer}>
-          <Text style={styles.completeEmoji}>
-            {levelCompleted ? '🎓' : percentage >= 80 ? '🎉' : percentage >= 60 ? '👍' : '💪'}
+        <View style={styles.center}>
+          <Text style={styles.completeEmoji}>{emoji}</Text>
+          <Text style={styles.completeTitle}>
+            {total === 0 ? 'Все повторено!' : 'Сесія завершена!'}
           </Text>
-          
-          {levelCompleted ? (
-            <>
-              <Text style={styles.completeTitle}>Вітаємо! 🎉</Text>
-              <Text style={styles.levelCompletedText}>
-                Ви завершили рівень {level}!
-              </Text>
-              <Text style={styles.levelCompletedSubtext}>
-                Переходьте до наступного рівня
-              </Text>
-            </>
+          {total > 0 ? (
+            <View style={styles.statsCard}>
+              {[
+                { label: '✅ Легко:', val: stats.easy, color: '#50C878' },
+                { label: '😅 Важко:', val: stats.hard, color: '#F39C12' },
+                { label: '❌ Не знав:', val: stats.wrong, color: '#E74C3C' },
+                { label: '📊 Результат:', val: `${pct}%`, color: '#4A90E2' },
+              ].map((s, i) => (
+                <View key={i} style={[styles.statRow, i === 3 && { borderBottomWidth: 0 }]}>
+                  <Text style={styles.statLabel}>{s.label}</Text>
+                  <Text style={[styles.statVal, { color: s.color }]}>{s.val}</Text>
+                </View>
+              ))}
+            </View>
           ) : (
-            <Text style={styles.completeTitle}>Сесія завершена!</Text>
+            <Text style={styles.noWordsText}>
+              {mode === 'review' ? 'Немає слів для повторення.\nПоверніться завтра!'
+                : mode === 'new' ? 'Немає нових слів.\nСпробуй інший рівень!'
+                : 'Немає слів для навчання.'}
+            </Text>
           )}
-          
-          <View style={styles.statsCard}>
-            {levelData && (
-              <View style={[styles.levelBadgeLarge, { backgroundColor: levelData.color }]}>
-                <Text style={styles.levelBadgeTextLarge}>{level}</Text>
-              </View>
-            )}
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Вивчено:</Text>
-              <Text style={[styles.statValue, { color: '#50C878' }]}>
-                {sessionStats.learned} слів
-              </Text>
-            </View>
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Повторень:</Text>
-              <Text style={[styles.statValue, { color: '#F39C12' }]}>
-                {sessionStats.reviewing}
-              </Text>
-            </View>
-            <View style={styles.statRow}>
-              <Text style={styles.statLabel}>Всього:</Text>
-              <Text style={[styles.statValue, { color: '#4A90E2' }]}>
-                {sessionStats.total} слів
-              </Text>
-            </View>
-          </View>
-
-          <TouchableOpacity
-            style={styles.restartButton}
-            onPress={restartSession}
-          >
-            <Text style={styles.restartButtonText}>🔄 Ще раз</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.goBack()}
-          >
-            <Text style={styles.backButtonText}>← Повернутися</Text>
+          <Text style={styles.nextHint}>Алгоритм сам нагадає коли повторити 🧠</Text>
+          <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
+            <Text style={styles.backBtnText}>← Назад</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
 
-  const currentCard = cards[currentIndex];
-  const levelData = levels.find(l => l.code === currentCard.level);
-  const progress = ((currentIndex + 1) / cards.length) * 100;
+  const card = sessionWords[currentIndex];
+  if (!card) return null;
+
+  const levelData = levels.find(l => l.code === card.level);
+  const rawState = srsStates[card.id];
+  const isNewWord = !rawState;
+  const progress = ((currentIndex + 1) / sessionWords.length) * 100;
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Header */}
+      {/* Шапка */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.closeButton}>✕</Text>
+        <TouchableOpacity onPress={() => { Speech.stop(); navigation.goBack(); }} style={styles.closeBtn}>
+          <Text style={styles.closeBtnText}>✕</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Навчання</Text>
-        <View style={styles.placeholder} />
-      </View>
-
-      {/* Progress Bar */}
-      <View style={styles.progressContainer}>
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${progress}%` }]} />
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerCounter}>{currentIndex + 1} / {sessionWords.length}</Text>
+          <View style={styles.headerBadges}>
+            {dueCount > 0 && <View style={styles.dueBadge}><Text style={styles.dueBadgeText}>🔄 {dueCount}</Text></View>}
+            {newCount > 0 && <View style={styles.newBadge}><Text style={styles.newBadgeText}>🆕 {newCount}</Text></View>}
+          </View>
         </View>
-        <Text style={styles.progressText}>
-          {currentIndex + 1} / {cards.length}
-        </Text>
-      </View>
-
-      {/* Stats */}
-      <View style={styles.miniStats}>
-        <View style={styles.miniStatItem}>
-          <Text style={styles.miniStatEmoji}>✅</Text>
-          <Text style={styles.miniStatText}>{sessionStats.learned}</Text>
-        </View>
-        <View style={styles.miniStatItem}>
-          <Text style={styles.miniStatEmoji}>🔄</Text>
-          <Text style={styles.miniStatText}>{sessionStats.reviewing}</Text>
+        <View style={styles.miniStats}>
+          <Text style={styles.miniStat}>✅{statsRef.current.easy}</Text>
+          <Text style={styles.miniStat}>😅{statsRef.current.hard}</Text>
+          <Text style={styles.miniStat}>❌{statsRef.current.wrong}</Text>
         </View>
       </View>
 
-      {/* Flashcard */}
-      <View style={styles.cardContainer}>
-        <TouchableOpacity
-          activeOpacity={1}
-          onPress={flipCard}
-          style={styles.card}
-        >
-          {!showTranslation ? (
-            // Front side - English
-            <Animated.View
-              style={[
-                styles.cardFace,
-                { transform: [{ rotateY: frontInterpolate }] },
-              ]}
-            >
+      {/* Прогрес */}
+      <View style={styles.progressBar}>
+        <View style={[styles.progressFill, { width: `${progress}%`, backgroundColor: levelData?.color || '#4A90E2' }]} />
+      </View>
+
+      {/* Картка */}
+      <Animated.View style={[styles.cardArea, { opacity: fadeAnim }]}>
+        {!showTranslation ? (
+          /* ФРОНТ */
+          <View style={styles.card}>
+            <View style={styles.cardTopRow}>
               <View style={[styles.levelBadge, { backgroundColor: levelData?.color || '#4A90E2' }]}>
-                <Text style={styles.levelText}>{currentCard.level}</Text>
+                <Text style={styles.levelText}>{card.level}</Text>
               </View>
-              
-              <View style={styles.cardContent}>
-                <Text style={styles.wordEnglish}>{currentCard.english}</Text>
-                
-                {currentCard.transcription && (
-                  <Text style={styles.transcription}>[{currentCard.transcription}]</Text>
-                )}
-                
-                {/* Audio Button */}
-                <TouchableOpacity
-                  style={styles.audioButton}
-                  onPress={() => speakWord(currentCard.english)}
-                >
-                  <Text style={styles.audioIcon}>
-                    {isSpeaking ? '🔊' : '🔈'}
-                  </Text>
-                  <Text style={styles.audioText}>Вимова</Text>
-                </TouchableOpacity>
-              </View>
+              {isNewWord
+                ? <View style={styles.newBadgeCard}><Text style={styles.newBadgeCardText}>🆕 Нове</Text></View>
+                : rawState
+                  ? <View style={styles.intervalBadge}><Text style={styles.intervalText}>📅 {getNextReviewText({ nextReview: rawState.next_review || rawState.nextReview })}</Text></View>
+                  : null
+              }
+            </View>
 
-              <Text style={styles.hint}>Натисніть для перекладу</Text>
-            </Animated.View>
-          ) : (
-            // Back side - Ukrainian
-            <Animated.View
-              style={[
-                styles.cardFace,
-                styles.cardBack,
-                { transform: [{ rotateY: backInterpolate }] },
-              ]}
+            <TouchableOpacity style={styles.cardTapArea} onPress={showCard} activeOpacity={0.8}>
+              <Text style={styles.wordEn}>{card.english}</Text>
+              {card.transcription && <Text style={styles.transcription}>[{card.transcription}]</Text>}
+              <Text style={styles.tapHint}>Натисніть для перекладу 👆</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.speakBtn, isSpeaking && styles.speakBtnActive]}
+              onPress={() => speakWord(card.english)}
             >
-              <View style={[styles.levelBadge, { backgroundColor: levelData?.color || '#4A90E2' }]}>
-                <Text style={styles.levelText}>{currentCard.level}</Text>
+              <Text style={styles.speakText}>{isSpeaking ? '🔊 Грає...' : '🔈 Вимова'}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          /* ЗВОРОТ */
+          <View style={[styles.card, styles.cardBack]}>
+            <View style={styles.cardTopRow}>
+              <View style={[styles.levelBadge, { backgroundColor: 'rgba(255,255,255,0.25)' }]}>
+                <Text style={styles.levelText}>{card.level}</Text>
               </View>
+            </View>
+            <Text style={styles.wordEnBack}>{card.english}</Text>
+            <Text style={styles.wordUa}>{card.ukrainian}</Text>
+            {card.example && <Text style={styles.example}>"{card.example}"</Text>}
+            <Text style={styles.ratingHint}>Наскільки добре ви знаєте це слово?</Text>
+          </View>
+        )}
+      </Animated.View>
 
-              <View style={styles.cardContent}>
-                <Text style={styles.wordEnglish}>{currentCard.english}</Text>
-                <Text style={styles.wordUkrainian}>{currentCard.ukrainian}</Text>
-                
-                {currentCard.example && (
-                  <View style={styles.exampleBox}>
-                    <Text style={styles.exampleText}>{currentCard.example}</Text>
-                  </View>
-                )}
-              </View>
-
-              <Text style={styles.hint}>Ви знаєте це слово?</Text>
-            </Animated.View>
-          )}
-        </TouchableOpacity>
-      </View>
-
-      {/* Action Buttons */}
-      {showTranslation && (
-        <View style={styles.actionsContainer}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.dontKnowButton]}
-            onPress={handleDontKnow}
-          >
-            <Text style={styles.actionButtonEmoji}>❌</Text>
-            <Text style={styles.actionButtonText}>Не знаю</Text>
+      {/* Кнопки */}
+      {showTranslation ? (
+        <View style={styles.ratingButtons}>
+          <TouchableOpacity style={[styles.ratingBtn, { backgroundColor: '#E74C3C' }]} onPress={() => handleRating(RATING.WRONG)}>
+            <Text style={styles.ratingEmoji}>❌</Text>
+            <Text style={styles.ratingLabel}>Не знаю</Text>
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionButton, styles.knowButton]}
-            onPress={handleKnow}
-          >
-            <Text style={styles.actionButtonEmoji}>✅</Text>
-            <Text style={styles.actionButtonText}>Знаю</Text>
+          <TouchableOpacity style={[styles.ratingBtn, { backgroundColor: '#F39C12' }]} onPress={() => handleRating(RATING.HARD)}>
+            <Text style={styles.ratingEmoji}>😅</Text>
+            <Text style={styles.ratingLabel}>Важко</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.ratingBtn, { backgroundColor: '#50C878' }]} onPress={() => handleRating(RATING.EASY)}>
+            <Text style={styles.ratingEmoji}>✅</Text>
+            <Text style={styles.ratingLabel}>Легко</Text>
           </TouchableOpacity>
         </View>
-      )}
-
-      {!showTranslation && (
-        <View style={styles.flipHintContainer}>
-          <Text style={styles.flipHint}>👆 Торкніться картку для перекладу</Text>
+      ) : (
+        <View style={styles.hintContainer}>
+          <Text style={styles.hint}>👆 Натисніть картку щоб побачити переклад</Text>
         </View>
       )}
     </SafeAreaView>
@@ -415,313 +321,76 @@ const moveToNext = async () => {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#F5F7FA',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 15,
-  },
-  closeButton: {
-    fontSize: 24,
-    color: '#2C3E50',
-    fontWeight: 'bold',
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-  },
-  placeholder: {
-    width: 24,
-  },
-  progressContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 10,
-  },
-  progressBar: {
-    height: 8,
-    backgroundColor: '#E0E0E0',
-    borderRadius: 4,
-    overflow: 'hidden',
-    marginBottom: 8,
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#4A90E2',
-    borderRadius: 4,
-  },
-  progressText: {
-    fontSize: 14,
-    color: '#7F8C8D',
-    textAlign: 'center',
-  },
-  miniStats: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 30,
-    paddingVertical: 10,
-  },
-  miniStatItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  miniStatEmoji: {
-    fontSize: 20,
-  },
-  miniStatText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-  },
-  cardContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
+  container: { flex: 1, backgroundColor: '#F5F7FA' },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  loadingText: { fontSize: 18, color: '#7F8C8D' },
+
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 14, paddingBottom: 8 },
+  closeBtn: { padding: 4 },
+  closeBtnText: { fontSize: 22, color: '#2C3E50', fontWeight: 'bold' },
+  headerCenter: { alignItems: 'center' },
+  headerCounter: { fontSize: 16, fontWeight: 'bold', color: '#2C3E50' },
+  headerBadges: { flexDirection: 'row', gap: 6, marginTop: 4 },
+  dueBadge: { backgroundColor: '#FFF3E0', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
+  dueBadgeText: { fontSize: 11, color: '#E67E22', fontWeight: '600' },
+  newBadge: { backgroundColor: '#E3F2FD', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
+  newBadgeText: { fontSize: 11, color: '#4A90E2', fontWeight: '600' },
+  miniStats: { flexDirection: 'row', gap: 6 },
+  miniStat: { fontSize: 12, fontWeight: 'bold', color: '#7F8C8D' },
+
+  progressBar: { height: 5, backgroundColor: '#E0E0E0', marginHorizontal: 16, borderRadius: 3, overflow: 'hidden', marginBottom: 8 },
+  progressFill: { height: '100%', borderRadius: 3 },
+
+  cardArea: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 },
+
   card: {
-    width: '100%',
-    height: 400,
-    maxWidth: 500,
-  },
-  cardFace: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 30,
-    justifyContent: 'space-between',
-    elevation: 8,
-    shadowColor: '#000',
+    width: '100%', minHeight: 360,
+    backgroundColor: '#fff', borderRadius: 24, padding: 28,
+    alignItems: 'center', justifyContent: 'center',
+    elevation: 8, shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    backfaceVisibility: 'hidden',
+    shadowOpacity: 0.15, shadowRadius: 8,
   },
-  cardBack: {
-    backgroundColor: '#4A90E2',
-    position: 'absolute',
-  },
-  levelBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  levelText: {
-    color: '#FFFFFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  cardContent: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  wordEnglish: {
-    fontSize: 48,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-    textAlign: 'center',
-    marginBottom: 10,
-  },
-  transcription: {
-    fontSize: 18,
-    color: '#7F8C8D',
-    marginBottom: 20,
-  },
-  wordUkrainian: {
-    fontSize: 32,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    textAlign: 'center',
-    marginTop: 10,
-  },
-  audioButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#4A90E2',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 25,
-    marginTop: 20,
-    gap: 8,
-  },
-  audioIcon: {
-    fontSize: 24,
-  },
-  audioText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  exampleBox: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    padding: 15,
-    borderRadius: 12,
-    marginTop: 20,
-  },
-  exampleText: {
-    fontSize: 14,
-    color: '#FFFFFF',
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  hint: {
-    fontSize: 14,
-    color: '#7F8C8D',
-    textAlign: 'center',
-  },
-  flipHintContainer: {
-    paddingVertical: 20,
-  },
-  flipHint: {
-    fontSize: 16,
-    color: '#4A90E2',
-    textAlign: 'center',
-  },
-  actionsContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-    gap: 15,
-  },
-  actionButton: {
-    flex: 1,
-    paddingVertical: 18,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  dontKnowButton: {
-    backgroundColor: '#E74C3C',
-  },
-  knowButton: {
-    backgroundColor: '#50C878',
-  },
-  actionButtonEmoji: {
-    fontSize: 32,
-    marginBottom: 8,
-  },
-  actionButtonText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-  },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  loadingText: {
-    fontSize: 18,
-    color: '#7F8C8D',
-  },
-  completeContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  completeEmoji: {
-    fontSize: 80,
-    marginBottom: 20,
-  },
-  completeTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#2C3E50',
-    marginBottom: 30,
-  },
-  levelCompletedText: {
-    fontSize: 20,
-    color: '#2C3E50',
-    marginBottom: 8,
-    fontWeight: '600',
-  },
-  levelCompletedSubtext: {
-    fontSize: 16,
-    color: '#7F8C8D',
-    marginBottom: 20,
-  },
-  levelBadgeLarge: {
-    alignSelf: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 8,
-    borderRadius: 16,
-    marginBottom: 20,
-  },
-  levelBadgeTextLarge: {
-    color: '#FFFFFF',
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  statsCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 30,
-    width: '100%',
-    maxWidth: 400,
-    marginBottom: 30,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-  },
-  statRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E0E0E0',
-  },
-  statLabel: {
-    fontSize: 16,
-    color: '#7F8C8D',
-  },
-  statValue: {
-    fontSize: 20,
-    fontWeight: 'bold',
-  },
-  restartButton: {
-    backgroundColor: '#4A90E2',
-    paddingHorizontal: 40,
-    paddingVertical: 16,
-    borderRadius: 16,
-    marginBottom: 15,
-    width: '100%',
-    maxWidth: 400,
-    elevation: 4,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-  },
-  restartButtonText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    textAlign: 'center',
-  },
-  backButton: {
-    paddingVertical: 12,
-  },
-  backButtonText: {
-    fontSize: 16,
-    color: '#4A90E2',
-    textAlign: 'center',
-  },
+  cardBack: { backgroundColor: '#4A90E2' },
+  cardTapArea: { alignItems: 'center', justifyContent: 'center', width: '100%', paddingVertical: 20 },
+  cardTopRow: { position: 'absolute', top: 20, left: 20, right: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+
+  levelBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
+  levelText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+  newBadgeCard: { backgroundColor: '#E3F2FD', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  newBadgeCardText: { fontSize: 11, color: '#4A90E2', fontWeight: '600' },
+  intervalBadge: { backgroundColor: '#F5F5F5', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  intervalText: { fontSize: 11, color: '#7F8C8D', fontWeight: '600' },
+
+  wordEn: { fontSize: 42, fontWeight: 'bold', color: '#2C3E50', textAlign: 'center', marginBottom: 8 },
+  wordEnBack: { fontSize: 28, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 8, opacity: 0.9 },
+  transcription: { fontSize: 16, color: '#7F8C8D', marginBottom: 4 },
+  tapHint: { fontSize: 13, color: '#BDC3C7', marginTop: 16 },
+
+  speakBtn: { backgroundColor: '#4A90E2', paddingHorizontal: 28, paddingVertical: 12, borderRadius: 24, marginTop: 16, elevation: 3 },
+  speakBtnActive: { backgroundColor: '#2ECC71' },
+  speakText: { color: '#fff', fontWeight: '600', fontSize: 15 },
+
+  wordUa: { fontSize: 36, fontWeight: 'bold', color: '#fff', textAlign: 'center', marginBottom: 12 },
+  example: { fontSize: 13, color: 'rgba(255,255,255,0.85)', textAlign: 'center', fontStyle: 'italic', paddingHorizontal: 16, marginTop: 8 },
+  ratingHint: { position: 'absolute', bottom: 20, fontSize: 12, color: 'rgba(255,255,255,0.7)', textAlign: 'center', paddingHorizontal: 20 },
+
+  ratingButtons: { flexDirection: 'row', padding: 16, gap: 10, paddingBottom: 24 },
+  ratingBtn: { flex: 1, alignItems: 'center', paddingVertical: 16, borderRadius: 16, elevation: 4 },
+  ratingEmoji: { fontSize: 28, marginBottom: 6 },
+  ratingLabel: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+
+  hintContainer: { padding: 24, alignItems: 'center', paddingBottom: 32 },
+  hint: { fontSize: 15, color: '#4A90E2', textAlign: 'center' },
+
+  completeEmoji: { fontSize: 72, marginBottom: 16 },
+  completeTitle: { fontSize: 28, fontWeight: 'bold', color: '#2C3E50', marginBottom: 24 },
+  statsCard: { backgroundColor: '#fff', borderRadius: 20, padding: 24, width: '100%', marginBottom: 20, elevation: 4 },
+  statRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#F5F5F5' },
+  statLabel: { fontSize: 16, color: '#7F8C8D' },
+  statVal: { fontSize: 20, fontWeight: 'bold' },
+  noWordsText: { fontSize: 16, color: '#7F8C8D', textAlign: 'center', lineHeight: 24, marginBottom: 24 },
+  nextHint: { fontSize: 14, color: '#7F8C8D', textAlign: 'center', marginBottom: 24 },
+  backBtn: { backgroundColor: '#4A90E2', paddingHorizontal: 40, paddingVertical: 16, borderRadius: 14, elevation: 4 },
+  backBtnText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
 });
